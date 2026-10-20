@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import { CustomEntityDefinition } from '../../common';
+import { extractCustomEntities } from './custom_entities';
 
 const MAX_DESCRIPTION = 1000;
 const MAX_LOCATION = 1024;
@@ -39,7 +41,15 @@ export function legacyAlertUid(legacyId: string): string {
  * This is intentionally separate from the AI egress projection: it stays
  * inside the deployment, but still avoids cloning arbitrary Wazuh fields.
  */
-export function projectOperationalAlert(hit: any, now = new Date().toISOString()): any {
+// [CUSTOM ENTITIES] customEntities is the loaded registry. When it is null or
+// undefined (registry could not be read, or a caller without one such as the
+// legacy migration) custom_entities is omitted, so a sync upsert leaves any
+// existing values in place rather than wiping them.
+export function projectOperationalAlert(
+  hit: any,
+  now = new Date().toISOString(),
+  customEntities?: ReadonlyArray<CustomEntityDefinition> | null
+): any {
   const source = hit?._source || {};
   const data = source.data && typeof source.data === 'object' ? source.data : {};
   const processValue = data.process;
@@ -93,6 +103,10 @@ export function projectOperationalAlert(hit: any, now = new Date().toISOString()
     decoder: source.decoder ? { name: scalar(source.decoder.name) } : null,
     location: truncate(source.location, MAX_LOCATION),
     full_log_excerpt: truncate(source.full_log, MAX_LOG_EXCERPT),
+    // [CUSTOM ENTITIES] Only the registry's field paths are copied, as
+    // normalized values (id -> string[]). Correlation, preview and the
+    // automation queue evaluate this projected copy, never the raw alert.
+    ...(customEntities ? { custom_entities: extractCustomEntities(customEntities, source) } : {}),
   };
 }
 

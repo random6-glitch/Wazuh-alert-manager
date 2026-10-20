@@ -11,6 +11,8 @@ import { defineAttackPathRoutes } from './attack_path';
 import { defineRuleRoutes } from './rules';
 import { defineSystemRoutes } from './system';
 import { defineEvidenceRoutes } from './evidence';
+// [CUSTOM ENTITIES] registry + backfill API
+import { defineCustomEntityRoutes } from './custom_entities';
 
 export function defineRoutes(router: IRouter) {
   router.get(
@@ -34,4 +36,5 @@ export function defineRoutes(router: IRouter) {
   defineRuleRoutes(router);
   defineSystemRoutes(router);
   defineEvidenceRoutes(router);
+  defineCustomEntityRoutes(router);
 }

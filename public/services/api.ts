@@ -11,6 +11,9 @@ import {
   CorrelationRulePreviewRequest,
   CorrelationRuleRevisionsResponse,
   CorrelationRuleUpdateRequest,
+  CustomEntityBackfillResult,
+  CustomEntityDefinition,
+  CustomEntityRegistryResponse,
 } from '../../common';
 
 export interface BuildInfo {
@@ -465,6 +468,27 @@ export class AlertsApiService {
 
   async fetchLifecycleSettings(): Promise<any> {
     return this.http.get(`${API_ROOT}/system/lifecycle/settings`);
+  }
+
+  // [CUSTOM ENTITIES] Registry of admin-defined correlation fields.
+  async fetchCustomEntities(): Promise<CustomEntityRegistryResponse> {
+    return this.http.get(`${API_ROOT}/custom-entities`);
+  }
+
+  async createCustomEntity(entity: CustomEntityDefinition): Promise<{ entities: CustomEntityDefinition[] }> {
+    return this.http.post(`${API_ROOT}/custom-entities`, { body: JSON.stringify(entity) });
+  }
+
+  async updateCustomEntity(id: string, entity: Omit<CustomEntityDefinition, 'id'>): Promise<{ entities: CustomEntityDefinition[] }> {
+    return this.http.put(`${API_ROOT}/custom-entities/${encodeURIComponent(id)}`, { body: JSON.stringify(entity) });
+  }
+
+  async deleteCustomEntity(id: string): Promise<{ entities: CustomEntityDefinition[] }> {
+    return this.http.delete(`${API_ROOT}/custom-entities/${encodeURIComponent(id)}`);
+  }
+
+  async backfillCustomEntities(hours: number): Promise<CustomEntityBackfillResult> {
+    return this.http.post(`${API_ROOT}/custom-entities/backfill`, { body: JSON.stringify({ hours }) });
   }
 
   async fetchSyncSettings(): Promise<any> {

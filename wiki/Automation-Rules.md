@@ -47,7 +47,34 @@ OR
 (Source user equals administrator AND Process equals sshd)
 ```
 
-Supported entities are Agent, Source/Destination IP, Source/Destination port, Source/Destination user, and Process. Agent can be part of a correlation identity, but agent scope still belongs on Match.
+Built-in entities are Agent, Source/Destination IP, Source/Destination port, Source/Destination user, and Process. Agent can be part of a correlation identity, but agent scope still belongs on Match. Any other alert field can be added as a **custom entity** (below).
+
+<!-- [CUSTOM ENTITIES] -->
+### Custom correlation entities
+
+Wazuh decoders put many useful values outside the built-in fields. For example Windows Security events carry the account in `data.win.eventdata.targetUserName` and the source address in `data.win.eventdata.ipAddress`, so a rule on 60122 (4625 logon failure) grouped by Destination user finds nothing.
+
+Administrators register such fields in **Settings → Correlation entities → Add custom field**:
+
+| Setting | Meaning |
+| --- | --- |
+| Source field path | Dot path inside the Wazuh alert, as shown in Discover, e.g. `data.win.eventdata.ipAddress`. |
+| Label | Name shown in the rule editor's Entity dropdown. |
+| ID | Stable slug; rules store the entity as `custom:<id>`. Cannot change after creation. |
+| Value type | `Text (case-insensitive)`, `Text (exact)`, `IP address` or `Port`. Controls how values are compared and grouped. |
+| Ignored values | Placeholders treated as missing, e.g. `-`, `::1`, `127.0.0.1`. |
+
+The entity then appears in every rule's Entity dropdown and works with `Equals` and `Is present`, in previews, live automation and burst windows.
+
+**Windows target user** (`custom:win_target_user`, reading `data.win.eventdata.targetUserName`, ignoring `-`) ships pre-registered. Rules saved with the earlier built-in `win_target_user` id are read as `custom:win_target_user` automatically. Because the correlation key includes the entity name, alerts arriving after the upgrade open new cases instead of extending ones opened under the old id.
+
+How it works and what to expect:
+
+- Correlation evaluates the plugin's compact copy of each alert, not the raw Wazuh document. Sync copies every registered field into that copy (`custom_entities`) as normalized values, up to 10 distinct values per field.
+- Alerts synced **before** a field was registered do not have it. Use **Backfill recent alerts** on the same page (1–168 hours, up to 50,000 alerts per run) to re-read only the registered fields from the original alerts. Status, case and assignment are not changed. Alerts whose original was already deleted by Wazuh retention are reported as unavailable.
+- While any rule uses a custom entity, its source field and value type are locked and it cannot be removed, because either change would silently alter that rule's case keys. Label, description and ignored values remain editable. To re-point a field, add a new entity and move the rules to it.
+- Saving or previewing a rule that references an unregistered custom entity is rejected; rolling back to a revision that used a since-removed entity is rejected too.
+- At most 20 custom entities can be registered.
 
 Preview and live execution use the same normalization and expression evaluator. IP addresses are canonicalized, ports are validated as integers from 0 through 65535, and user/process values are lowercased. A missing field does not form an `unknown` bucket; that group does not match. If one alert satisfies multiple OR groups, actions run once and all matching-group provenance is retained.
 

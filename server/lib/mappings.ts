@@ -95,6 +95,11 @@ export const alertStatusMapping = {
       },
     },
     decoder: { properties: { name: { type: 'keyword' } } },
+    // [CUSTOM ENTITIES] Registry-driven correlation values (id -> string[]).
+    // Stored in _source for in-memory evaluation but not indexed: ids are
+    // admin-defined, and an indexed dynamic object would break the explicit,
+    // dynamic:false contract of this index.
+    custom_entities: { type: 'object', enabled: false },
     location: { type: 'keyword', ignore_above: 1024 },
     full_log_excerpt: { type: 'text', index: false },
   },

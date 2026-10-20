@@ -1,4 +1,4 @@
-import { CorrelationEntity, CorrelationRule } from '../../common';
+import { CorrelationEntity, CorrelationRule, CUSTOM_ENTITY_PREFIX } from '../../common';
 
 export type RuleMatchResult =
   | { supported: true; matched: boolean }
@@ -10,6 +10,10 @@ export type RuleMatchResult =
 // dynamic_templates in mappings.ts. Callers wrap aggregations in try/catch so a
 // text-mapped field on an older index degrades to "no matches" rather than error.
 export function entityField(entity: CorrelationEntity): string {
+  // [CUSTOM ENTITIES] Kept consistent with the evaluator; these helpers are
+  // not currently called by the correlation engine. custom_entities is not
+  // indexed, so this path is for _source access only.
+  if (entity.startsWith(CUSTOM_ENTITY_PREFIX)) return `custom_entities.${entity.slice(CUSTOM_ENTITY_PREFIX.length)}`;
   switch (entity) {
     case 'srcip':
       return 'data.srcip';
@@ -30,7 +34,9 @@ export function entityField(entity: CorrelationEntity): string {
 export function entityValueFromAlert(entity: CorrelationEntity, source: any): string | null {
   const data = source?.data && typeof source.data === 'object' ? source.data : {};
   let v: any;
-  switch (entity) {
+  // [CUSTOM ENTITIES] See entityField() above.
+  if (entity.startsWith(CUSTOM_ENTITY_PREFIX)) v = source?.custom_entities?.[entity.slice(CUSTOM_ENTITY_PREFIX.length)];
+  else switch (entity) {
     case 'srcip':
       v = data.srcip;
       break;

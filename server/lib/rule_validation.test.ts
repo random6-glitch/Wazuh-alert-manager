@@ -109,4 +109,40 @@ describe('automation rule normalization and validation', () => {
       ruleDefinitionFingerprint(first)
     );
   });
+
+  // [CUSTOM ENTITIES]
+  const registry = [
+    { id: 'win_target_user', label: 'Windows target user', fieldPath: 'data.win.eventdata.targetUserName', valueType: 'text_ci' as const, ignoreValues: ['-'] },
+  ];
+  const customRule = (entity: string, value?: string) => ({
+    ...validRule(),
+    match: { ruleIds: ['60122'] },
+    trigger: {
+      type: 'burst', threshold: 3, windowMinutes: 10,
+      entityExpression: { version: 1, groups: [{ id: 'g', order: 0, predicates: [
+        { id: 'p', order: 0, entity, operator: value === undefined ? 'exists' : 'equals', ...(value === undefined ? {} : { value }) },
+      ] }] },
+    },
+  });
+
+  test('checks custom entities against the registry and normalizes their values by type', () => {
+    const result = normalizeAndValidateRule(customRule('custom:win_target_user', ' ADMINISTRATOR '), registry);
+    expect(result.errors).toEqual([]);
+    expect(result.rule.trigger.entityExpression.groups[0].predicates[0]).toMatchObject({
+      entity: 'custom:win_target_user', value: 'administrator',
+    });
+    expect(normalizeAndValidateRule(customRule('custom:logon_ip'), registry).errors).toContain(
+      'Entity predicate p uses custom entity "logon_ip", which is not defined.'
+    );
+    expect(normalizeAndValidateRule(customRule('custom:win_target_user', '-'), registry).errors).toContain(
+      'Entity predicate p has an invalid or blank value.'
+    );
+  });
+
+  test('saves a rule written with the retired win_target_user id as custom:win_target_user', () => {
+    const result = normalizeAndValidateRule(customRule('win_target_user'), registry);
+    expect(result.errors).toEqual([]);
+    expect(result.rule.trigger.entityExpression.groups[0].predicates[0].entity).toBe('custom:win_target_user');
+    expect(ruleDefinitionFingerprint(customRule('win_target_user'))).toBe(ruleDefinitionFingerprint(customRule('custom:win_target_user')));
+  });
 });

@@ -9,7 +9,12 @@ import {
   CORRELATION_ENTITIES,
   ALERT_STATUSES,
   AUTOMATION_MAX_ENABLED_RULES,
+  CUSTOM_ENTITY_ID_PATTERN,
+  CUSTOM_ENTITY_PREFIX,
+  LEGACY_ENTITY_ALIASES,
 } from '../../common';
+import { loadCustomEntityRegistry } from '../lib/custom_entities';
+import { normalizeEntityExpression } from '../lib/entity_expression';
 import { getCurrentUsername } from '../lib/opensearch';
 import { requirePluginAdmin } from '../lib/authorization';
 import { appendActivity, appendActivityOnce, reportActivityFailure } from '../lib/activity';
@@ -26,7 +31,17 @@ const matchSchema = schema.object({
   agentNamesMode: modeSchema,
   minLevel: schema.maybe(schema.number({ min: 0, max: 16 })),
 });
-const entitySchema = schema.oneOf(CORRELATION_ENTITIES.map((value) => schema.literal(value)) as any);
+// [CUSTOM ENTITIES] Accept the built-in ids, retired aliases (read as their
+// custom replacement), or any well-formed "custom:<id>". Whether that id
+// exists is checked against the registry in normalizeAndValidateRule.
+const customEntityPattern = new RegExp(`^${CUSTOM_ENTITY_PREFIX}${CUSTOM_ENTITY_ID_PATTERN.slice(1)}`);
+const entitySchema = schema.string({
+  maxLength: 64,
+  validate: (value) =>
+    (CORRELATION_ENTITIES as readonly string[]).includes(value) || LEGACY_ENTITY_ALIASES[value] || customEntityPattern.test(value)
+      ? undefined
+      : `"${value}" is not a built-in entity or a custom:<id> reference.`,
+});
 const predicateSchema = schema.object({
   id: schema.string({ minLength: 1, maxLength: 256 }),
   order: schema.number({ min: 0 }),
@@ -185,9 +200,21 @@ export const editableRuleSnapshot = (rule: any) =>
     return snapshot;
   }, {});
 
+// [CUSTOM ENTITIES] Compare normalized expressions, so reading a stored
+// "win_target_user" as "custom:win_target_user" is not mistaken for an edit
+// (which would otherwise block every change to an enabled rule using it).
 export const entityGroupsChanged = (current: any, next: any): boolean =>
-  JSON.stringify(current?.trigger?.entityExpression?.groups || []) !==
-  JSON.stringify(next?.trigger?.entityExpression?.groups || []);
+  JSON.stringify(normalizeEntityExpression(current?.trigger?.entityExpression || { groups: [] }).groups) !==
+  JSON.stringify(normalizeEntityExpression(next?.trigger?.entityExpression || { groups: [] }).groups);
+
+/** [CUSTOM ENTITIES] Registry for validation; storage errors surface as 503. */
+async function registryForValidation(client: any) {
+  try {
+    return (await loadCustomEntityRegistry(client)).entities;
+  } catch (error: any) {
+    throw Object.assign(new Error(`Custom entity registry could not be loaded: ${error.message}`), { statusCode: 503 });
+  }
+}
 
 export function requireDisabledEntityGroupEdit(current: any, next: any): void {
   if (current.enabled && entityGroupsChanged(current, next)) {
@@ -488,7 +515,14 @@ export function defineRuleRoutes(router: IRouter) {
       } catch (e: any) {
         return response.forbidden({ body: { message: e.message } });
       }
-      const validation = normalizeAndValidateRule(request.body);
+      // [CUSTOM ENTITIES] Validate custom:<id> references against the registry.
+      let registry;
+      try {
+        registry = await registryForValidation(context.core.opensearch.client.asCurrentUser);
+      } catch (e: any) {
+        return response.customError({ statusCode: e.statusCode || 500, body: { message: e.message } });
+      }
+      const validation = normalizeAndValidateRule(request.body, registry);
       if (validation.errors.length) return response.badRequest({ body: { message: validation.errors[0], errors: validation.errors } });
       if (validation.rule.enabled) {
         return response.badRequest({ body: { message: 'New rules must be created disabled, then previewed before activation.' } });
@@ -551,7 +585,14 @@ export function defineRuleRoutes(router: IRouter) {
         return response.forbidden({ body: { message: e.message } });
       }
       const { id, revision, lookbackHours = 24, ...input } = request.body as any;
-      const validation = normalizeAndValidateRule(input);
+      // [CUSTOM ENTITIES] Same registry check as save, so preview and save agree.
+      let registry;
+      try {
+        registry = await registryForValidation(context.core.opensearch.client.asCurrentUser);
+      } catch (e: any) {
+        return response.customError({ statusCode: e.statusCode || 500, body: { message: e.message } });
+      }
+      const validation = normalizeAndValidateRule(input, registry);
       if (validation.errors.length) return response.badRequest({ body: { message: validation.errors[0], errors: validation.errors } });
       const client = context.core.opensearch.client.asCurrentUser;
       const user = await getCurrentUsername(context, request);
@@ -693,7 +734,8 @@ export function defineRuleRoutes(router: IRouter) {
           return response.customError({ statusCode: 409, body: { message: 'Rule revision is stale.' } });
         }
         const revisionResult: any = await client.get({ index: RULES_INDEX, id: revisionId(id, targetRevision) });
-        const validation = normalizeAndValidateRule(revisionResult.body._source.snapshot);
+        // [CUSTOM ENTITIES] A revision that uses a since-deleted custom entity cannot be restored.
+        const validation = normalizeAndValidateRule(revisionResult.body._source.snapshot, await registryForValidation(client));
         if (validation.errors.length) return response.badRequest({ body: { message: validation.errors[0], errors: validation.errors } });
         const now = new Date().toISOString();
         const doc: any = applyRuleActivationMetadata(
@@ -721,7 +763,7 @@ export function defineRuleRoutes(router: IRouter) {
         );
         return response.ok({ body: withConcurrency(finalized) });
       } catch (e: any) {
-        return response.customError({ statusCode: e?.meta?.statusCode || 500, body: { message: e.message } });
+        return response.customError({ statusCode: e.statusCode || e?.meta?.statusCode || 500, body: { message: e.message } });
       }
     }
   );
@@ -786,7 +828,8 @@ export function defineRuleRoutes(router: IRouter) {
         if (current.deleted_at) {
           return response.customError({ statusCode: 409, body: { message: 'Deleted rules must be restored through rollback.' } });
         }
-        const validation = normalizeAndValidateRule(mergeRulePatch(current, patch));
+        // [CUSTOM ENTITIES] Validate custom:<id> references against the registry.
+        const validation = normalizeAndValidateRule(mergeRulePatch(current, patch), await registryForValidation(client));
         if (validation.errors.length) return response.badRequest({ body: { message: validation.errors[0], errors: validation.errors } });
         requireDisabledEntityGroupEdit(current, validation.rule);
         const now = new Date().toISOString();

@@ -244,7 +244,8 @@ export interface CaseAnalystMetrics {
   meanTimeToCloseMinutes: number | null;
 }
 
-export type CorrelationEntity =
+/** Entities with a fixed, code-defined field path. */
+export type BuiltinCorrelationEntity =
   | 'agent'
   | 'srcip'
   | 'dstip'
@@ -253,6 +254,57 @@ export type CorrelationEntity =
   | 'user'
   | 'dstuser'
   | 'process';
+
+// [CUSTOM ENTITIES] An entity is either built in or a reference to an
+// admin-defined registry entry, written as "custom:<id>" (for example
+// "custom:win_target_user"). The registry entry decides which raw Wazuh field
+// is read and how its value is normalized; see CustomEntityDefinition.
+export type CustomCorrelationEntity = `custom:${string}`;
+export type CorrelationEntity = BuiltinCorrelationEntity | CustomCorrelationEntity;
+
+// [CUSTOM ENTITIES] How a custom entity's values are normalized. The same
+// normalization runs at sync time (stored value) and at rule-save time
+// (configured "equals" value), so both sides always compare like for like.
+//  - text_ci: trimmed, lower-cased (account names, hostnames)
+//  - text:    trimmed, case preserved (hashes, IDs where case matters)
+//  - ip:      canonical IPv4 / compressed IPv6
+//  - port:    integer 0-65535
+export type CustomEntityValueType = 'text_ci' | 'text' | 'ip' | 'port';
+
+/** [CUSTOM ENTITIES] One registry entry, managed in Settings > Correlation entities. */
+export interface CustomEntityDefinition {
+  /** Stable slug; rules reference it as `custom:<id>`. Immutable after creation. */
+  id: string;
+  /** Text shown in the rule editor's Entity dropdown. */
+  label: string;
+  /** Dot path inside the raw wazuh-alerts document, e.g. data.win.eventdata.targetUserName. */
+  fieldPath: string;
+  valueType: CustomEntityValueType;
+  /** Placeholder values treated as absent (compared after normalization). */
+  ignoreValues: string[];
+  description?: string;
+  created_at?: string;
+  created_by?: string;
+  updated_at?: string;
+  updated_by?: string;
+}
+
+/** [CUSTOM ENTITIES] GET /custom-entities response. */
+export interface CustomEntityRegistryResponse {
+  entities: CustomEntityDefinition[];
+  /** Rule names that reference each entity id; an entity in use cannot be deleted or re-pointed. */
+  usage: Record<string, string[]>;
+}
+
+/** [CUSTOM ENTITIES] POST /custom-entities/backfill response. */
+export interface CustomEntityBackfillResult {
+  hours: number;
+  scanned: number;
+  updated: number;
+  missingSource: number;
+  failed: number;
+  truncated: boolean;
+}
 
 export type MatchMode = 'any' | 'all';
 

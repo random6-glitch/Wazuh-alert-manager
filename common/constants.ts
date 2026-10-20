@@ -88,8 +88,32 @@ export const AI_SETTINGS_DOC_ID = 'ai_settings';
 
 // Correlation rules: entity types an alert can be grouped by, and the ceiling
 // on how many cases one evaluation pass may auto-create (blast-radius guard).
+// Built-in entities only. Custom entities ("custom:<id>") are validated
+// against the registry; see the CUSTOM ENTITIES constants below.
 export const CORRELATION_ENTITIES = [
   'agent', 'srcip', 'dstip', 'srcport', 'dstport', 'user', 'dstuser', 'process',
 ] as const;
 export const MAX_AUTO_CASES_PER_RUN = 20;
+
+// [CUSTOM ENTITIES] Registry of admin-defined correlation fields.
+// Stored as one document in META_INDEX, like sync and AI settings.
+export const CUSTOM_ENTITIES_DOC_ID = 'custom_entities';
+export const CUSTOM_ENTITY_PREFIX = 'custom:';
+export const MAX_CUSTOM_ENTITIES = 20;
+/** Lower-case slug, starts with a letter, max 40 chars. */
+export const CUSTOM_ENTITY_ID_PATTERN = '^[a-z][a-z0-9_]{0,39}$';
+/** Dot path of up to 10 segments; segments allow letters, digits, _ - @. */
+export const CUSTOM_ENTITY_PATH_PATTERN = '^[A-Za-z0-9_@-]{1,64}(\\.[A-Za-z0-9_@-]{1,64}){0,9}$';
+export const CUSTOM_ENTITY_VALUE_TYPES = ['text_ci', 'text', 'ip', 'port'] as const;
+/** At most this many distinct values are kept per entity per alert. */
+export const MAX_CUSTOM_ENTITY_VALUES = 10;
+export const MAX_CUSTOM_ENTITY_VALUE_LENGTH = 256;
+export const MAX_CUSTOM_ENTITY_BACKFILL_HOURS = 168;
+export const MAX_CUSTOM_ENTITY_BACKFILL_ALERTS = 50000;
+// [CUSTOM ENTITIES] The former built-in "win_target_user" entity, now shipped
+// as a pre-defined registry entry. Rules saved with the old id are read as
+// "custom:win_target_user" (see normalizeEntityExpression).
+export const LEGACY_ENTITY_ALIASES: Record<string, string> = {
+  win_target_user: 'custom:win_target_user',
+};
 

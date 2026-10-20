@@ -6,6 +6,8 @@ import { RulesView } from './rules_view';
 import { StorageHealthView } from './storage_health_view';
 import { AboutView } from './about_view';
 import { SyncSettingsView } from './sync_settings_view';
+// [CUSTOM ENTITIES] registry of admin-defined correlation fields
+import { CustomEntitiesView } from './custom_entities_view';
 
 interface Props {
   apiService: AlertsApiService;
@@ -14,7 +16,7 @@ interface Props {
 
 export const SettingsView: React.FC<Props> = ({ apiService, onToast }) => {
   const requested = new URLSearchParams(window.location.search).get('settingsTab');
-  const initial = ['automation', 'ai', 'sync', 'storage', 'about'].includes(requested || '') ? requested! : 'automation';
+  const initial = ['automation', 'entities', 'ai', 'sync', 'storage', 'about'].includes(requested || '') ? requested! : 'automation';
   const [selected, setSelected] = useState(initial);
   const selectTab = (id: string) => {
     setSelected(id);
@@ -27,6 +29,11 @@ export const SettingsView: React.FC<Props> = ({ apiService, onToast }) => {
       id: 'automation',
       name: 'Automation rules',
       content: <RulesView apiService={apiService} onToast={onToast} />,
+    },
+    {
+      id: 'entities',
+      name: 'Correlation entities',
+      content: <CustomEntitiesView apiService={apiService} onToast={onToast} />,
     },
     {
       id: 'ai',

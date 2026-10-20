@@ -39,7 +39,12 @@ import { assertManagedWriteTarget } from './index_namespace';
 // A fresh install creates indices with the current mapping and records this
 // version; an upgraded install has an older (or absent) version and runs
 // ensureMappingAdditions() once to PUT the new fields onto its existing indices.
-const MAPPING_VERSION = 12;
+// [CUSTOM ENTITIES] 12 -> 14: alertStatusMapping gained custom_entities
+// (disabled object). 13 was the interim win_target_user build, which mapped
+// data.win.eventdata.targetUserName; that field is no longer written but stays
+// harmlessly on indices that already have it. Upgrades from 12 or 13 PUT the
+// new field once on restart.
+const MAPPING_VERSION = 14;
 const MAPPING_VERSION_DOC_ID = 'mapping_version';
 
 const MANAGED_INDICES: Array<[string, any]> = [

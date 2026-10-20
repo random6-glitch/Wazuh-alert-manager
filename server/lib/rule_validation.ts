@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { ALERT_STATUSES, CASE_SEVERITIES } from '../../common';
-import { validateEntityExpression } from './entity_expression';
+import { CustomEntityRegistry, normalizeEntityExpression, validateEntityExpression } from './entity_expression';
 import { CANONICAL_RULE_SCHEMA_VERSION, canonicalizeRuleSchema } from './rule_schema_migration';
 
 export const DEFAULT_RULE_PRIORITY = 100;
@@ -143,8 +143,17 @@ export function ruleDefinitionFingerprint(input: any): string {
   return createHash('sha256').update(canonicalJson(definition)).digest('hex');
 }
 
-export function normalizeAndValidateRule(input: any): RuleValidationResult {
+/**
+ * [CUSTOM ENTITIES] Routes pass the loaded registry so custom entities are
+ * checked for existence and their "equals" values are normalized by the
+ * entity's value type before storage. Without a registry only the
+ * "custom:<id>" format is checked (unit tests, internal callers).
+ */
+export function normalizeAndValidateRule(input: any, registry?: CustomEntityRegistry): RuleValidationResult {
   const rule = normalizeRule(input);
+  if (registry) {
+    rule.trigger = { ...rule.trigger, entityExpression: normalizeEntityExpression(rule.trigger.entityExpression, registry) };
+  }
   const errors: string[] = [];
   const actions = rule.actions;
   const trigger = rule.trigger;
@@ -160,7 +169,7 @@ export function normalizeAndValidateRule(input: any): RuleValidationResult {
   }
   if (!['continue', 'stop'].includes(rule.processingMode)) errors.push('Processing mode must be continue or stop.');
   if (!['per_alert', 'burst'].includes(trigger.type)) errors.push('Trigger type must be per_alert or burst.');
-  errors.push(...validateEntityExpression(trigger.entityExpression));
+  errors.push(...validateEntityExpression(rule.trigger.entityExpression, registry));
   if (!['separate_by_group', 'consolidate_overlapping', 'one_per_rule'].includes(trigger.routing)) {
     errors.push('Case routing must be separate_by_group, consolidate_overlapping, or one_per_rule.');
   }

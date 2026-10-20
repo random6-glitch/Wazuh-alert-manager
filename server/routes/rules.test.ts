@@ -238,6 +238,25 @@ describe('canonical mutation contract', () => {
     expect(() => requireDisabledEntityGroupEdit({ ...current, enabled: false }, next)).not.toThrow();
   });
 
+  // [CUSTOM ENTITIES]
+  const withEntity = (entity: string) => ({
+    ...trigger(),
+    entityExpression: { version: 1, groups: [{ id: 'g', order: 0, predicates: [{ id: 'p', order: 0, entity, operator: 'exists' }] }] },
+  });
+
+  test('accepts custom:<id> and retired aliases, and rejects malformed entities', () => {
+    expect(() => canonicalTriggerSchema.validate(withEntity('custom:logon_ip'))).not.toThrow();
+    expect(() => canonicalTriggerSchema.validate(withEntity('win_target_user'))).not.toThrow();
+    expect(() => canonicalTriggerSchema.validate(withEntity('custom:Logon-IP'))).toThrow();
+    expect(() => canonicalTriggerSchema.validate(withEntity('data.win.eventdata.ipAddress'))).toThrow();
+  });
+
+  test('does not treat reading win_target_user as custom:win_target_user as an entity edit', () => {
+    const current = { enabled: true, trigger: withEntity('win_target_user') };
+    expect(() => requireDisabledEntityGroupEdit(current, { enabled: true, trigger: withEntity('custom:win_target_user') })).not.toThrow();
+    expect(() => requireDisabledEntityGroupEdit(current, { enabled: true, trigger: withEntity('custom:logon_ip') })).toThrow('Disable and save');
+  });
+
   test('sets an ingestion activation boundary and rotates entity state only after disabled edits', () => {
     const current = { enabled: false, state_epoch: 'old', effective_from: null, trigger: trigger() };
     const enabled = applyRuleActivationMetadata(current, { ...current, enabled: true }, '2026-08-28T12:00:00.000Z');

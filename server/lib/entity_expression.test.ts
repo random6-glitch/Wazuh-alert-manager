@@ -101,4 +101,48 @@ describe('security entity expressions', () => {
       'Entity predicate p3 has an invalid or blank value.',
     ]));
   });
+
+  // [CUSTOM ENTITIES] custom:<id> entities read the projected custom_entities object.
+  const registry = [
+    { id: 'win_target_user', label: 'Windows target user', fieldPath: 'data.win.eventdata.targetUserName', valueType: 'text_ci' as const, ignoreValues: ['-'] },
+    { id: 'logon_ip', label: 'Logon IP', fieldPath: 'data.win.eventdata.ipAddress', valueType: 'ip' as const, ignoreValues: ['::1'] },
+  ];
+  const existsOn = (entity: string) => normalizeEntityExpression(expression([
+    { id: 'g', order: 0, predicates: [predicate('p', entity, undefined, 0, 'exists')] },
+  ]));
+
+  test('custom entities match on stored custom_entities values', () => {
+    const result = evaluateEntityExpression(existsOn('custom:win_target_user'), {
+      custom_entities: { win_target_user: ['administrator'] },
+    });
+    expect(result.matched).toBe(true);
+    expect(result.matchingGroups[0].values).toEqual([
+      { predicateId: 'p', entity: 'custom:win_target_user', value: 'administrator' },
+    ]);
+    expect(evaluateEntityExpression(existsOn('custom:win_target_user'), { data: { dstuser: 'root' } }).matched).toBe(false);
+  });
+
+  test('retired built-in win_target_user is read as custom:win_target_user', () => {
+    const normalized = existsOn('win_target_user');
+    expect(normalized.groups[0].predicates[0].entity).toBe('custom:win_target_user');
+    expect(validateEntityExpression(normalized)).toEqual([]);
+  });
+
+  test('normalizes custom equals values by the registry value type and ignore list', () => {
+    expect(normalizeEntityValue('custom:win_target_user', ' ADMIN ', registry)).toBe('admin');
+    expect(normalizeEntityValue('custom:win_target_user', ' - ', registry)).toBeNull();
+    expect(normalizeEntityValue('custom:logon_ip', '010.000.000.005', registry)).toBe('10.0.0.5');
+    expect(normalizeEntityValue('custom:logon_ip', '0:0:0:0:0:0:0:1', registry)).toBeNull();
+    // Without a registry (live evaluation) values are only trimmed: they were normalized when stored.
+    expect(normalizeEntityValue('custom:win_target_user', ' ADMIN ')).toBe('ADMIN');
+  });
+
+  test('rejects malformed custom ids, and unknown ids when a registry is supplied', () => {
+    expect(validateEntityExpression(existsOn('custom:Bad-Id'))).toEqual(['Entity predicate p has an invalid entity.']);
+    expect(validateEntityExpression(existsOn('custom:missing'))).toEqual([]);
+    expect(validateEntityExpression(existsOn('custom:missing'), registry)).toEqual([
+      'Entity predicate p uses custom entity "missing", which is not defined.',
+    ]);
+    expect(validateEntityExpression(existsOn('custom:logon_ip'), registry)).toEqual([]);
+  });
 });

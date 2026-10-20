@@ -1,21 +1,51 @@
 import {
+  BuiltinCorrelationEntity,
   CorrelationEntity,
   CorrelationEntityExpression,
+  CustomEntityDefinition,
+  CustomEntityValueType,
+  CORRELATION_ENTITIES,
+  CUSTOM_ENTITY_ID_PATTERN,
+  CUSTOM_ENTITY_PREFIX,
+  LEGACY_ENTITY_ALIASES,
+  MAX_CUSTOM_ENTITY_VALUE_LENGTH,
 } from '../../common';
 
 export const MAX_ENTITY_GROUPS = 5;
 export const MAX_ENTITY_PREDICATES = 5;
 
-const ENTITIES: CorrelationEntity[] = [
-  'agent',
-  'srcip',
-  'dstip',
-  'srcport',
-  'dstport',
-  'user',
-  'dstuser',
-  'process',
-];
+const ENTITIES: readonly BuiltinCorrelationEntity[] = CORRELATION_ENTITIES;
+const CUSTOM_ID = new RegExp(CUSTOM_ENTITY_ID_PATTERN);
+
+// [CUSTOM ENTITIES] Optional registry passed in by callers that have loaded it
+// (rule save/preview routes, sync). Pure evaluation does not need it, because
+// custom values are already normalized where they are produced.
+export type CustomEntityRegistry = ReadonlyArray<CustomEntityDefinition> | null | undefined;
+
+export function isBuiltinEntity(entity: unknown): entity is BuiltinCorrelationEntity {
+  return typeof entity === 'string' && (ENTITIES as readonly string[]).includes(entity);
+}
+
+/** [CUSTOM ENTITIES] True for a well-formed "custom:<id>" reference (registry membership is checked separately). */
+export function isCustomEntity(entity: unknown): entity is `custom:${string}` {
+  return typeof entity === 'string' && entity.startsWith(CUSTOM_ENTITY_PREFIX) &&
+    CUSTOM_ID.test(entity.slice(CUSTOM_ENTITY_PREFIX.length));
+}
+
+export function customEntityId(entity: string): string {
+  return entity.slice(CUSTOM_ENTITY_PREFIX.length);
+}
+
+/** [CUSTOM ENTITIES] Map retired built-in ids (win_target_user) to their registry reference. */
+export function resolveEntityAlias(entity: any): any {
+  return typeof entity === 'string' && LEGACY_ENTITY_ALIASES[entity] ? LEGACY_ENTITY_ALIASES[entity] : entity;
+}
+
+function findDefinition(registry: CustomEntityRegistry, entity: string): CustomEntityDefinition | undefined {
+  if (!registry || !isCustomEntity(entity)) return undefined;
+  const id = customEntityId(entity);
+  return registry.find((definition) => definition.id === id);
+}
 
 function canonicalIpv4(value: string): string | null {
   const parts = value.split('.');
@@ -69,22 +99,62 @@ function canonicalIpv6(value: string): string | null {
   return `${before}::${after}`;
 }
 
-/** Normalize values identically for persistence, preview, live matching, and identity keys. */
-export function normalizeEntityValue(entity: CorrelationEntity, input: unknown): string | null {
-  if (input == null) return null;
+/** Normalize a raw value by value type. Shared by built-in and custom entities. */
+export function normalizeTypedValue(valueType: CustomEntityValueType, input: unknown): string | null {
+  if (input == null || typeof input === 'object') return null;
   const value = String(input).trim();
   if (!value) return null;
-  if (entity === 'srcip' || entity === 'dstip') return canonicalIpv4(value) || canonicalIpv6(value);
-  if (entity === 'srcport' || entity === 'dstport') {
+  if (valueType === 'ip') return canonicalIpv4(value) || canonicalIpv6(value);
+  if (valueType === 'port') {
     if (!/^\d+$/.test(value)) return null;
     const port = Number(value);
     return Number.isInteger(port) && port >= 0 && port <= 65535 ? String(port) : null;
   }
+  if (value.length > MAX_CUSTOM_ENTITY_VALUE_LENGTH) return null;
+  return valueType === 'text_ci' ? value.toLowerCase() : value;
+}
+
+/**
+ * [CUSTOM ENTITIES] Normalize one value of a custom entity: type normalization,
+ * then the definition's ignore list (e.g. Windows "-"), compared after the same
+ * normalization so "-", " - " and case variants are all ignored.
+ */
+export function normalizeCustomEntityValue(definition: CustomEntityDefinition, input: unknown): string | null {
+  const value = normalizeTypedValue(definition.valueType, input);
+  if (value == null) return null;
+  const ignored = (definition.ignoreValues || [])
+    .map((entry) => normalizeTypedValue(definition.valueType, entry))
+    .filter((entry): entry is string => entry != null);
+  return ignored.includes(value) ? null : value;
+}
+
+/** Normalize values identically for persistence, preview, live matching, and identity keys. */
+export function normalizeEntityValue(
+  entity: CorrelationEntity,
+  input: unknown,
+  registry?: CustomEntityRegistry
+): string | null {
+  if (input == null) return null;
+  // [CUSTOM ENTITIES] With a registry (rule save/preview) apply the entity's
+  // own type and ignore list. Without one (live evaluation) values were
+  // already normalized when stored, so only trimming is applied.
+  if (isCustomEntity(entity)) {
+    const definition = findDefinition(registry, entity);
+    if (definition) return normalizeCustomEntityValue(definition, input);
+    const value = String(input).trim();
+    return value || null;
+  }
+  const value = String(input).trim();
+  if (!value) return null;
+  if (entity === 'srcip' || entity === 'dstip') return normalizeTypedValue('ip', value);
+  if (entity === 'srcport' || entity === 'dstport') return normalizeTypedValue('port', value);
   if (entity === 'user' || entity === 'dstuser' || entity === 'process') return value.toLowerCase();
   return value;
 }
 
-export function normalizeEntityExpression(input: any): CorrelationEntityExpression {
+const isKnownEntity = (entity: unknown) => isBuiltinEntity(entity) || isCustomEntity(entity);
+
+export function normalizeEntityExpression(input: any, registry?: CustomEntityRegistry): CorrelationEntityExpression {
   const groups = Array.isArray(input?.groups) ? input.groups : [];
   return {
     version: 1,
@@ -92,13 +162,17 @@ export function normalizeEntityExpression(input: any): CorrelationEntityExpressi
       .map((group: any) => ({
         ...group,
         predicates: (Array.isArray(group?.predicates) ? group.predicates : [])
+          // [CUSTOM ENTITIES] Rewrite retired built-in ids on every read, so
+          // rules saved as "win_target_user" keep working as
+          // "custom:win_target_user" without a stored-data migration.
+          .map((predicate: any) => ({ ...predicate, entity: resolveEntityAlias(predicate?.entity) }))
           .map((predicate: any) => ({
             ...predicate,
             operator: predicate?.operator || 'equals',
             ...(predicate?.operator === 'exists'
               ? { value: undefined }
-              : { value: ENTITIES.includes(predicate?.entity)
-              ? normalizeEntityValue(predicate.entity, predicate.value) ?? ''
+              : { value: isKnownEntity(predicate?.entity)
+              ? normalizeEntityValue(predicate.entity, predicate.value, registry) ?? ''
               : typeof predicate?.value === 'string'
               ? predicate.value.trim()
               : predicate?.value }),
@@ -109,7 +183,15 @@ export function normalizeEntityExpression(input: any): CorrelationEntityExpressi
   };
 }
 
-export function validateEntityExpression(expression: CorrelationEntityExpression): string[] {
+/**
+ * Validate structure and entities. [CUSTOM ENTITIES] When a registry is given
+ * (rule save, preview, rollback) every custom entity must exist in it; without
+ * one only the "custom:<id>" format is checked.
+ */
+export function validateEntityExpression(
+  expression: CorrelationEntityExpression,
+  registry?: CustomEntityRegistry
+): string[] {
   const errors: string[] = [];
   const groups: any[] = Array.isArray(expression?.groups) ? expression.groups : [];
   const predicates: any[] = ([] as any[]).concat(...groups.map((group) => group.predicates || []));
@@ -144,14 +226,17 @@ export function validateEntityExpression(expression: CorrelationEntityExpression
         errors.push(`Entity predicate ${predicate.id || '?'} needs a non-negative integer order.`);
       } else if (orders.has(predicate.order)) errors.push(`Duplicate predicate order in group ${group.id || '?'}: ${predicate.order}.`);
       else orders.add(predicate.order);
-      if (!ENTITIES.includes(predicate.entity)) errors.push(`Entity predicate ${predicate.id || '?'} has an invalid entity.`);
+      if (!isKnownEntity(predicate.entity)) errors.push(`Entity predicate ${predicate.id || '?'} has an invalid entity.`);
+      else if (registry && isCustomEntity(predicate.entity) && !findDefinition(registry, predicate.entity)) {
+        errors.push(`Entity predicate ${predicate.id || '?'} uses custom entity "${customEntityId(predicate.entity)}", which is not defined.`);
+      }
       if (predicate.operator !== 'exists' && predicate.operator !== 'equals') {
         errors.push(`Entity predicate ${predicate.id || '?'} has an invalid operator.`);
       }
       const normalized = predicate.operator === 'exists'
         ? ''
-        : ENTITIES.includes(predicate.entity)
-        ? normalizeEntityValue(predicate.entity, predicate.value)
+        : isKnownEntity(predicate.entity)
+        ? normalizeEntityValue(predicate.entity, predicate.value, registry)
         : null;
       if (predicate.operator === 'equals' && normalized == null) errors.push(`Entity predicate ${predicate.id || '?'} has an invalid or blank value.`);
       else {
@@ -167,6 +252,13 @@ export function validateEntityExpression(expression: CorrelationEntityExpression
 function valuesFromAlert(entity: CorrelationEntity, alert: any): unknown[] {
   const data = alert?.data && typeof alert.data === 'object' ? alert.data : {};
   let value: any;
+  // [CUSTOM ENTITIES] Custom values live in the projected custom_entities
+  // object, written by sync/backfill from the registry's fieldPath.
+  if (isCustomEntity(entity)) {
+    const stored = alert?.custom_entities && typeof alert.custom_entities === 'object' ? alert.custom_entities : {};
+    value = stored[customEntityId(entity)];
+    return Array.isArray(value) ? value : value == null ? [] : [value];
+  }
   switch (entity) {
     case 'srcip': value = data.srcip; break;
     case 'dstip': value = data.dstip; break;

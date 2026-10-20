@@ -11,6 +11,7 @@ import {
 import { assertManagedWriteTarget, assertSafeSourcePattern, isManagedPhysicalIndex } from './index_namespace';
 import { resolveAlerts } from './index_resolution';
 import { projectOperationalAlert } from './operational_projection';
+import { loadCustomEntitiesForSync } from './custom_entities';
 import { loadSyncSettings } from './sync_settings';
 
 const SYNC_STATE_DOC_ID = 'sync_state';
@@ -331,7 +332,14 @@ export async function runSyncOnce(
     return;
   }
 
-  const projected = hits.map((hit) => projectOperationalAlert(hit));
+  // [CUSTOM ENTITIES] Load the registry once per batch and copy each defined
+  // field into custom_entities. null (registry unreadable) omits the field so
+  // existing values survive; a warning makes the degraded tick visible.
+  const customEntities = await loadCustomEntitiesForSync(client);
+  if (!customEntities) {
+    logger.warn('wazuh-alert-manager sync: custom entity registry unavailable; custom_entities left unchanged for this batch');
+  }
+  const projected = hits.map((hit) => projectOperationalAlert(hit, undefined, customEntities));
   let existingLocations: Map<string, any>;
   let archivedStates: Map<string, string>;
   try {

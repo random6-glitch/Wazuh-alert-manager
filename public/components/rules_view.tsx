@@ -43,6 +43,9 @@ import {
   CorrelationRulePreview,
   CorrelationRulePreviewRequest,
   CorrelationRuleRevision,
+  CustomEntityDefinition,
+  CUSTOM_ENTITY_PREFIX,
+  LEGACY_ENTITY_ALIASES,
   MatchMode,
 } from '../../common';
 import { formatRelative, statusLabel } from '../design';
@@ -77,8 +80,38 @@ const ENTITY_LABEL: Record<string, string> = {
   dstport: 'Destination port',
 };
 
-const ENTITY_OPTIONS = (['srcip', 'dstip', 'srcport', 'dstport', 'user', 'dstuser', 'process'] as CorrelationEntity[])
-  .map((entity) => ({ value: entity, text: ENTITY_LABEL[entity] }));
+const BUILTIN_ENTITY_ORDER: CorrelationEntity[] = ['srcip', 'dstip', 'srcport', 'dstport', 'user', 'dstuser', 'process'];
+
+// [CUSTOM ENTITIES] Dropdown = built-ins + registry entries (as "custom:<id>").
+// A rule may still reference an entity that is no longer registered; it is
+// kept as an option, marked, so opening the rule does not silently change it.
+const entityOptions = (customEntities: CustomEntityDefinition[], current?: string) => {
+  const options: Array<{ value: string; text: string }> = BUILTIN_ENTITY_ORDER.map((entity) => ({ value: entity, text: ENTITY_LABEL[entity] }));
+  for (const entity of customEntities) options.push({ value: `${CUSTOM_ENTITY_PREFIX}${entity.id}`, text: `${entity.label} (custom)` });
+  if (current && !options.some((option) => option.value === current)) options.push({ value: current, text: `${current} (not registered)` });
+  return options;
+};
+
+const entityLabelFrom = (customEntities: CustomEntityDefinition[], entity: string) => {
+  if (ENTITY_LABEL[entity]) return ENTITY_LABEL[entity];
+  if (entity.startsWith(CUSTOM_ENTITY_PREFIX)) {
+    const id = entity.slice(CUSTOM_ENTITY_PREFIX.length);
+    return customEntities.find((definition) => definition.id === id)?.label || id;
+  }
+  return entity;
+};
+
+// [CUSTOM ENTITIES] Retired built-in ids (win_target_user) open as their custom replacement.
+const withEntityAliases = (expression: CorrelationEntityExpression): CorrelationEntityExpression => ({
+  ...expression,
+  groups: (expression.groups || []).map((group) => ({
+    ...group,
+    predicates: (group.predicates || []).map((predicate) => ({
+      ...predicate,
+      entity: (LEGACY_ENTITY_ALIASES[predicate.entity] || predicate.entity) as CorrelationEntity,
+    })),
+  })),
+});
 const ADMIN_DOCS = 'https://documentation.wazuh.com/current/user-manual/user-administration/index.html';
 const ADMIN_HELP = 'Your effective Wazuh authorization does not include all_access. OpenSearch Security roles, not SSO/LDAP group names, control automation administration.';
 const MAX_ENTITY_GROUPS = 5;
@@ -86,10 +119,10 @@ const MAX_ENTITY_PREDICATES = 5;
 let nextLocalId = 0;
 const localId = (prefix: string) => `${prefix}-${Date.now()}-${++nextLocalId}`;
 const emptyExpression = (): CorrelationEntityExpression => ({ version: 1, groups: [] });
-const legacyExpression = (rule: any): CorrelationEntityExpression => rule.trigger?.entityExpression || (rule.trigger?.entity || rule.entity ? {
+const legacyExpression = (rule: any): CorrelationEntityExpression => withEntityAliases(rule.trigger?.entityExpression || (rule.trigger?.entity || rule.entity ? {
   version: 1,
   groups: [{ id: localId('group'), order: 0, predicates: [{ id: localId('predicate'), order: 0, entity: rule.trigger?.entity || rule.entity, operator: 'exists' }] }],
-} : emptyExpression());
+} : emptyExpression()));
 
 const normalizeForEdit = (rule: any): EditorRule => {
   const trigger = rule.trigger?.type
@@ -220,6 +253,9 @@ export const RulesView: React.FC<Props> = ({ apiService, onToast }) => {
   const [previewFingerprint, setPreviewFingerprint] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<CorrelationRule | null>(null);
   const [analysts, setAnalysts] = useState<string[]>([]);
+  // [CUSTOM ENTITIES] Registry entries offered in the Entity dropdown.
+  const [customEntities, setCustomEntities] = useState<CustomEntityDefinition[]>([]);
+  const entityLabel = (entity: string) => entityLabelFrom(customEntities, entity);
   const [revisions, setRevisions] = useState<CorrelationRuleRevision[]>([]);
   const [revisionsLoading, setRevisionsLoading] = useState(false);
   const [rollingBack, setRollingBack] = useState<number | null>(null);
@@ -285,6 +321,7 @@ export const RulesView: React.FC<Props> = ({ apiService, onToast }) => {
   useEffect(() => {
     load();
     apiService.fetchUsers().then(setAnalysts).catch(() => setAnalysts([]));
+    apiService.fetchCustomEntities().then((registry) => setCustomEntities(registry.entities || [])).catch(() => setCustomEntities([]));
     apiService
       .fetchSystemCapabilities()
       .then((capabilities: any) => setCanAdminister(Boolean(capabilities?.isPluginAdmin)))
@@ -347,6 +384,21 @@ export const RulesView: React.FC<Props> = ({ apiService, onToast }) => {
   const normalizedPredicateValue = (predicate: CorrelationEntityPredicate) => {
     if (predicate.operator === 'exists') return '';
     const value = String(predicate.value || '').trim();
+    // [CUSTOM ENTITIES] Mirror the server's normalizeCustomEntityValue(): the
+    // entity's value type, then its ignore list. Keeps the editor's
+    // duplicate/blank checks in agreement with the API.
+    if (predicate.entity.startsWith(CUSTOM_ENTITY_PREFIX)) {
+      const definition = customEntities.find((entity) => `${CUSTOM_ENTITY_PREFIX}${entity.id}` === predicate.entity);
+      if (!definition) return value;
+      const typed = (raw: string): string => {
+        const text = raw.trim();
+        if (definition.valueType === 'text_ci') return text.toLowerCase();
+        if (definition.valueType === 'text') return text;
+        return normalizedPredicateValue({ ...predicate, entity: definition.valueType === 'ip' ? 'srcip' : 'srcport', value: text });
+      };
+      const normalized = typed(value);
+      return (definition.ignoreValues || []).map(typed).includes(normalized) ? '' : normalized;
+    }
     if (predicate.entity === 'user' || predicate.entity === 'dstuser' || predicate.entity === 'process') return value.toLowerCase();
     if (predicate.entity === 'srcport' || predicate.entity === 'dstport') {
       return /^\d+$/.test(value) && Number(value) <= 65535 ? String(Number(value)) : '';
@@ -372,9 +424,9 @@ export const RulesView: React.FC<Props> = ({ apiService, onToast }) => {
     const seen = new Set<string>();
     predicates.forEach((predicate) => {
       const normalized = normalizedPredicateValue(predicate);
-      if (predicate.operator === 'equals' && !normalized) errors.push(`${ENTITY_LABEL[predicate.entity]} needs a valid, non-blank value.`);
+      if (predicate.operator === 'equals' && !normalized) errors.push(`${entityLabel(predicate.entity)} needs a valid, non-blank value.`);
       const key = `${predicate.entity}:${predicate.operator}:${normalized}`;
-      if (seen.has(key)) errors.push(`Duplicate predicate: ${ENTITY_LABEL[predicate.entity]} ${predicate.operator === 'exists' ? 'exists' : `equals ${normalized}`}.`);
+      if (seen.has(key)) errors.push(`Duplicate predicate: ${entityLabel(predicate.entity)} ${predicate.operator === 'exists' ? 'exists' : `equals ${normalized}`}.`);
       seen.add(key);
     });
     return Array.from(new Set(errors));
@@ -706,7 +758,7 @@ export const RulesView: React.FC<Props> = ({ apiService, onToast }) => {
   const currentErrors = editing ? ruleErrors(editing) : [];
   const expressionSummary = expression.groups.length ? expression.groups.map((group) => `(${group.predicates.map((predicate) => {
     const value = predicate.operator === 'exists' ? 'is present' : `equals "${normalizedPredicateValue(predicate) || '...'}"`;
-    return `${ENTITY_LABEL[predicate.entity]} ${value}`;
+    return `${entityLabel(predicate.entity)} ${value}`;
   }).join(' AND ') || 'add a predicate'})`).join(' OR ') : 'Any entity values (no trigger predicates)';
 
   const matchField = (label: string, key: 'ruleGroups' | 'ruleIds' | 'agentNames', modeKey: 'ruleGroupsMode' | 'ruleIdsMode' | 'agentNamesMode', placeholder: string) => (
@@ -931,7 +983,7 @@ export const RulesView: React.FC<Props> = ({ apiService, onToast }) => {
                         <React.Fragment key={predicate.id}>
                           {predicateIndex > 0 && <div className="wamRuleOperator"><EuiBadge color="hollow">AND</EuiBadge></div>}
                           <EuiFlexGroup gutterSize="s" alignItems="flexEnd" className="wamPredicateRow">
-                            <EuiFlexItem><EuiFormRow label="Entity"><EuiSelect fullWidth options={ENTITY_OPTIONS} value={predicate.entity} onChange={(event) => updatePredicate(group.id, predicate.id, { entity: event.target.value as CorrelationEntity })} /></EuiFormRow></EuiFlexItem>
+                            <EuiFlexItem><EuiFormRow label="Entity"><EuiSelect fullWidth options={entityOptions(customEntities, predicate.entity)} value={predicate.entity} onChange={(event) => updatePredicate(group.id, predicate.id, { entity: event.target.value as CorrelationEntity })} /></EuiFormRow></EuiFlexItem>
                             <EuiFlexItem><EuiFormRow label="Operator"><EuiSelect fullWidth options={[{ value: 'equals', text: 'Equals' }, { value: 'exists', text: 'Is present' }]} value={predicate.operator} onChange={(event) => updatePredicate(group.id, predicate.id, { operator: event.target.value as any, ...(event.target.value === 'exists' ? { value: undefined } : {}) })} /></EuiFormRow></EuiFlexItem>
                             <EuiFlexItem grow={2}><EuiFormRow label="Value" helpText={predicate.operator === 'equals' ? 'Required. Normalized before matching and identity-key construction.' : 'No value required. The observed entity value becomes the identity; missing fields do not match.'}><EuiFieldText fullWidth disabled={predicate.operator === 'exists'} value={predicate.value || ''} placeholder={predicate.entity === 'dstport' ? '22' : 'Required value'} onChange={(event) => updatePredicate(group.id, predicate.id, { value: event.target.value })} /></EuiFormRow></EuiFlexItem>
                             <EuiFlexItem grow={false}><EuiButtonIcon iconType="cross" aria-label={`Remove predicate ${predicateIndex + 1}`} onClick={() => removePredicate(group.id, predicate.id)} /></EuiFlexItem>
